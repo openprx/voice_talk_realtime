@@ -2,3 +2,5 @@
 /pkg/
 *.wasm
 node_modules/
+-e /target/
+/prx-plugin/target/
