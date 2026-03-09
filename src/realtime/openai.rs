@@ -60,21 +60,51 @@ impl OpenAiRealtimeClient {
         self.send_event(&ClientEvent::SessionUpdate { session })
     }
 
-    /// Convenience: append base64-encoded audio
+    // Fix #1: send_text() — correct two-step: conversation.item.create + response.create
+    /// Send a text message: create a conversation item then trigger a response.
+    pub fn send_text(&self, text: &str) -> Result<(), JsValue> {
+        // Step 1: create a user message conversation item
+        let item = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": text
+            }]
+        });
+        self.send_event(&ClientEvent::ConversationItemCreate { item })?;
+
+        // Step 2: trigger response generation
+        self.send_event(&ClientEvent::ResponseCreate { response: None })
+    }
+
+    // Fix #2: send_audio() — only append, no auto-commit/create (server_vad handles it)
+    /// Append base64-encoded audio. In server_vad mode, the server will
+    /// automatically detect speech boundaries and trigger responses.
     pub fn append_audio_base64(&self, audio: impl Into<String>) -> Result<(), JsValue> {
         self.send_event(&ClientEvent::InputAudioBufferAppend {
             audio: audio.into(),
         })
     }
 
-    /// Convenience: commit audio buffer
+    /// Explicitly commit audio buffer (only needed in manual/push-to-talk mode)
     pub fn commit_audio(&self) -> Result<(), JsValue> {
         self.send_event(&ClientEvent::InputAudioBufferCommit {})
+    }
+
+    /// Clear audio buffer (useful on interruption)
+    pub fn clear_audio(&self) -> Result<(), JsValue> {
+        self.send_event(&ClientEvent::InputAudioBufferClear {})
     }
 
     /// Convenience: create response
     pub fn create_response(&self, response: Option<serde_json::Value>) -> Result<(), JsValue> {
         self.send_event(&ClientEvent::ResponseCreate { response })
+    }
+
+    /// Cancel an in-progress response (e.g. on user interruption)
+    pub fn cancel_response(&self) -> Result<(), JsValue> {
+        self.send_event(&ClientEvent::ResponseCancel {})
     }
 
     fn resolve_url(&self, url: &str) -> String {
@@ -90,7 +120,7 @@ impl OpenAiRealtimeClient {
         if let Ok(ev) = serde_json::from_str::<ServerEvent>(raw) {
             return Some(ev);
         }
-        // Manual fallback for variant event type names
+        // Manual fallback for variant event type names (xAI compat)
         let value: serde_json::Value = serde_json::from_str(raw).ok()?;
         let event_type = value.get("type")?.as_str()?;
         match event_type {
