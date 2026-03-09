@@ -2,19 +2,16 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use base64::Engine;
-use serde_json::json;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::{CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
 
-use crate::realtime::protocol::{ClientEvent, EventCallback, ServerEvent};
-use crate::realtime::RealtimeClient;
+use crate::realtime::protocol::{ClientEvent, ServerEvent, RealtimeClient};
 
 struct ClientState {
     events: VecDeque<ServerEvent>,
-    callback: Option<EventCallback>,
+    connected: bool,
 }
 
 pub struct OpenAiRealtimeClient {
@@ -22,10 +19,11 @@ pub struct OpenAiRealtimeClient {
     model: String,
     ws: Option<WebSocket>,
     state: Rc<RefCell<ClientState>>,
-    on_open: Option<Closure<dyn FnMut(Event)>>,
-    on_message: Option<Closure<dyn FnMut(MessageEvent)>>,
-    on_error: Option<Closure<dyn FnMut(Event)>>,
-    on_close: Option<Closure<dyn FnMut(CloseEvent)>>,
+    // prevent closures from being dropped
+    _on_open: Option<Closure<dyn FnMut(Event)>>,
+    _on_message: Option<Closure<dyn FnMut(MessageEvent)>>,
+    _on_error: Option<Closure<dyn FnMut(Event)>>,
+    _on_close: Option<Closure<dyn FnMut(CloseEvent)>>,
 }
 
 impl OpenAiRealtimeClient {
@@ -40,12 +38,12 @@ impl OpenAiRealtimeClient {
             ws: None,
             state: Rc::new(RefCell::new(ClientState {
                 events: VecDeque::new(),
-                callback: None,
+                connected: false,
             })),
-            on_open: None,
-            on_message: None,
-            on_error: None,
-            on_close: None,
+            _on_open: None,
+            _on_message: None,
+            _on_error: None,
+            _on_close: None,
         }
     }
 
@@ -57,107 +55,57 @@ impl OpenAiRealtimeClient {
         self.model = model.into();
     }
 
+    /// Convenience: send session.update
     pub fn send_session_update(&self, session: serde_json::Value) -> Result<(), JsValue> {
-        self.send_client_event(&ClientEvent::SessionUpdate { session })
+        self.send_event(&ClientEvent::SessionUpdate { session })
     }
 
+    /// Convenience: append base64-encoded audio
     pub fn append_audio_base64(&self, audio: impl Into<String>) -> Result<(), JsValue> {
-        self.send_client_event(&ClientEvent::InputAudioBufferAppend {
+        self.send_event(&ClientEvent::InputAudioBufferAppend {
             audio: audio.into(),
         })
     }
 
+    /// Convenience: commit audio buffer
     pub fn commit_audio(&self) -> Result<(), JsValue> {
-        self.send_client_event(&ClientEvent::InputAudioBufferCommit {})
+        self.send_event(&ClientEvent::InputAudioBufferCommit {})
     }
 
-    pub fn create_response(&self, response: serde_json::Value) -> Result<(), JsValue> {
-        self.send_client_event(&ClientEvent::ResponseCreate {
-            response: Some(response),
-        })
-    }
-
-    pub fn poll_event(&mut self) -> Option<ServerEvent> {
-        self.state.borrow_mut().events.pop_front()
+    /// Convenience: create response
+    pub fn create_response(&self, response: Option<serde_json::Value>) -> Result<(), JsValue> {
+        self.send_event(&ClientEvent::ResponseCreate { response })
     }
 
     fn resolve_url(&self, url: &str) -> String {
         if url.starts_with("wss://") || url.starts_with("ws://") {
             return url.to_string();
         }
-
         let model = if !url.is_empty() { url } else { &self.model };
         format!("wss://api.openai.com/v1/realtime?model={model}")
     }
 
-    fn send_client_event(&self, event: &ClientEvent) -> Result<(), JsValue> {
-        let ws = self
-            .ws
-            .as_ref()
-            .ok_or_else(|| JsValue::from_str("WebSocket is not connected"))?;
-        let payload = serde_json::to_string(event)
-            .map_err(|e| JsValue::from_str(&format!("failed to serialize client event: {e}")))?;
-        ws.send_with_str(&payload)
+    fn parse_server_event(raw: &str) -> Option<ServerEvent> {
+        // Try serde first
+        if let Ok(ev) = serde_json::from_str::<ServerEvent>(raw) {
+            return Some(ev);
+        }
+        // Manual fallback for variant event type names
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let event_type = value.get("type")?.as_str()?;
+        match event_type {
+            "response.output_audio.delta" => Some(ServerEvent::ResponseAudioDelta {
+                delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            }),
+            "response.output_audio_transcript.delta" => Some(ServerEvent::ResponseAudioTranscriptDelta {
+                delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            }),
+            _ => Some(ServerEvent::Unknown),
+        }
     }
 
     fn push_event(state: &Rc<RefCell<ClientState>>, event: ServerEvent) {
-        let mut state_mut = state.borrow_mut();
-        state_mut.events.push_back(event.clone());
-        if let Some(cb) = state_mut.callback.as_mut() {
-            cb(event);
-        }
-    }
-
-    fn parse_server_event(raw: &str) -> Option<ServerEvent> {
-        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
-        let event_type = value.get("type")?.as_str()?;
-
-        match event_type {
-            "session.created" => Some(ServerEvent::SessionCreated {
-                session: value
-                    .get("session")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-            }),
-            "response.text.delta" => Some(ServerEvent::ResponseTextDelta {
-                delta: value
-                    .get("delta")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            }),
-            "response.audio.delta" | "response.output_audio.delta" => {
-                Some(ServerEvent::ResponseAudioDelta {
-                    delta: value
-                        .get("delta")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                })
-            }
-            "response.audio_transcript.delta" | "response.output_audio_transcript.delta" => {
-                Some(ServerEvent::ResponseAudioTranscriptDelta {
-                    delta: value
-                        .get("delta")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                })
-            }
-            "response.done" => Some(ServerEvent::ResponseDone {
-                response: value
-                    .get("response")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null),
-            }),
-            "error" => Some(ServerEvent::Error {
-                error: value
-                    .get("error")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!({ "message": "unknown websocket error" })),
-            }),
-            _ => None,
-        }
+        state.borrow_mut().events.push_back(event);
     }
 }
 
@@ -176,9 +124,11 @@ impl RealtimeClient for OpenAiRealtimeClient {
 
         let ws = WebSocket::new_with_str_sequence(&ws_url, &protocols)?;
 
+        // onopen
         let open_state = Rc::clone(&self.state);
-        let on_open = Closure::wrap(Box::new(move |_event: Event| {
-            OpenAiRealtimeClient::push_event(
+        let on_open = Closure::wrap(Box::new(move |_: Event| {
+            open_state.borrow_mut().connected = true;
+            Self::push_event(
                 &open_state,
                 ServerEvent::SessionCreated {
                     session: serde_json::Value::Null,
@@ -187,91 +137,82 @@ impl RealtimeClient for OpenAiRealtimeClient {
         }) as Box<dyn FnMut(Event)>);
         ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
 
-        let message_state = Rc::clone(&self.state);
+        // onmessage
+        let msg_state = Rc::clone(&self.state);
         let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
             if let Some(text) = event.data().as_string() {
-                if let Some(parsed) = OpenAiRealtimeClient::parse_server_event(&text) {
-                    OpenAiRealtimeClient::push_event(&message_state, parsed);
+                if let Some(parsed) = Self::parse_server_event(&text) {
+                    Self::push_event(&msg_state, parsed);
                 }
             }
         }) as Box<dyn FnMut(MessageEvent)>);
         ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
-        let error_state = Rc::clone(&self.state);
+        // onerror
+        let err_state = Rc::clone(&self.state);
         let on_error = Closure::wrap(Box::new(move |event: Event| {
             let message = event
                 .dyn_ref::<ErrorEvent>()
                 .map(|e| e.message())
-                .filter(|msg| !msg.is_empty())
+                .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| "websocket error".to_string());
-            OpenAiRealtimeClient::push_event(
-                &error_state,
+            Self::push_event(
+                &err_state,
                 ServerEvent::Error {
-                    error: json!({ "message": message }),
+                    error: serde_json::Value::String(message),
                 },
             );
         }) as Box<dyn FnMut(Event)>);
         ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
+        // onclose
         let close_state = Rc::clone(&self.state);
         let on_close = Closure::wrap(Box::new(move |event: CloseEvent| {
+            close_state.borrow_mut().connected = false;
             let message = if event.reason().is_empty() {
                 format!("websocket closed with code {}", event.code())
             } else {
-                format!(
-                    "websocket closed with code {}: {}",
-                    event.code(),
-                    event.reason()
-                )
+                format!("websocket closed: {} ({})", event.reason(), event.code())
             };
-            OpenAiRealtimeClient::push_event(
+            Self::push_event(
                 &close_state,
                 ServerEvent::Error {
-                    error: json!({ "message": message }),
+                    error: serde_json::Value::String(message),
                 },
             );
         }) as Box<dyn FnMut(CloseEvent)>);
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
-        self.on_open = Some(on_open);
-        self.on_message = Some(on_message);
-        self.on_error = Some(on_error);
-        self.on_close = Some(on_close);
+        self._on_open = Some(on_open);
+        self._on_message = Some(on_message);
+        self._on_error = Some(on_error);
+        self._on_close = Some(on_close);
         self.ws = Some(ws);
         Ok(())
     }
 
-    fn send_text(&mut self, text: &str) -> Result<(), JsValue> {
-        self.send_client_event(&ClientEvent::ResponseCreate {
-            response: Some(json!({
-                "instructions": text
-            })),
-        })
+    fn send_event(&self, event: &ClientEvent) -> Result<(), JsValue> {
+        let ws = self
+            .ws
+            .as_ref()
+            .ok_or_else(|| JsValue::from_str("WebSocket not connected"))?;
+        let payload = serde_json::to_string(event)
+            .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))?;
+        ws.send_with_str(&payload)
     }
 
-    fn send_audio(&mut self, audio_chunk: &[u8]) -> Result<(), JsValue> {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(audio_chunk);
-        self.send_client_event(&ClientEvent::InputAudioBufferAppend { audio: encoded })?;
-        self.send_client_event(&ClientEvent::InputAudioBufferCommit {})?;
-        self.send_client_event(&ClientEvent::ResponseCreate {
-            response: Some(serde_json::Value::Object(Default::default())),
-        })
+    fn poll_event(&self) -> Option<ServerEvent> {
+        self.state.borrow_mut().events.pop_front()
     }
 
-    fn on_event(&mut self, callback: EventCallback) {
-        self.state.borrow_mut().callback = Some(callback);
-    }
-
-    fn close(&mut self) -> Result<(), JsValue> {
+    fn close(&self) {
         if let Some(ws) = &self.ws {
-            ws.close()?;
+            let _ = ws.close();
         }
-        self.ws = None;
-        self.on_open = None;
-        self.on_message = None;
-        self.on_error = None;
-        self.on_close = None;
-        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.state.borrow().connected
     }
 }
 

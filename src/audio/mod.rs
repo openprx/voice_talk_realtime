@@ -1,1 +1,3 @@
-// Placeholder for browser audio capture and processing.
+pub mod capture;
+pub mod codec;
+pub mod playback;
