@@ -23,6 +23,7 @@
       <div class="row">
         <label for="apikey">API Key</label>
         <input type="password" id="apikey" placeholder="sk-..." />
+        <small style="color:#ff6b6b; display:block; margin-top:2px; font-size:0.7rem;">仅限本地调试，请勿在公网使用</small>
       </div>
       <div class="row">
         <label for="model">Model</label>
@@ -54,6 +55,11 @@
     <div class="card">
       <h2>Audio</h2>
       <canvas id="visualizer"></canvas>
+      <div class="vad-toggle">
+        <label for="vad-toggle">PTT</label>
+        <input type="checkbox" id="vad-toggle" class="toggle-switch" />
+        <label for="vad-toggle">VAD</label>
+      </div>
       <button id="btn-ptt" class="btn-ptt" disabled>Hold to Talk</button>
     </div>
 
@@ -68,7 +74,7 @@
     // ── Voice lists per provider ──
     const VOICES = {
       openai: ['alloy', 'echo', 'shimmer', 'ash', 'coral', 'sage'],
-      xai: ['tara', 'sage', 'ash', 'coral', 'ember'],
+      xai: ['eve', 'ara', 'rex', 'sal', 'leo'],
     };
     const MODELS = {
       openai: 'gpt-4o-realtime-preview-2024-12-17',
@@ -150,6 +156,8 @@
           setStatus(true, 'Connected');
           btnDisconn.disabled = false;
           btnPtt.disabled = false;
+          // Pre-create playback AudioContext on user gesture (Safari fix)
+          if (!playbackCtx) playbackCtx = new AudioContext({ sampleRate: 24000 });
           addMessage('system', `Connected to ${provider}`);
 
           // Send session.update
@@ -301,6 +309,19 @@
         };
 
         source.connect(workletNode);
+
+        // E: Recording visualization
+        const recAnalyser = audioCtx.createAnalyser();
+        recAnalyser.fftSize = 2048;
+        source.connect(recAnalyser);
+        const recDataArray = new Float32Array(recAnalyser.fftSize);
+        function drawRecording() {
+          if (!isRecording) return;
+          recAnalyser.getFloatTimeDomainData(recDataArray);
+          drawVisualization(recDataArray);
+          requestAnimationFrame(drawRecording);
+        }
+        drawRecording();
       } catch (e) {
         addMessage('system', `Mic error: ${e.message}`);
         stopRecording();
@@ -316,8 +337,8 @@
       if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
       if (audioCtx) { audioCtx.close(); audioCtx = null; }
 
-      // Commit audio and request response
-      if (ws && ws.readyState === WebSocket.OPEN) {
+      // In PTT mode, commit audio and request response
+      if (!vadEnabled && ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
         ws.send(JSON.stringify({ type: 'response.create', response: {} }));
       }
@@ -329,6 +350,37 @@
     btnPtt.addEventListener('mouseleave', () => { if (isRecording) stopRecording(); });
     btnPtt.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); });
     btnPtt.addEventListener('touchend', (e) => { e.preventDefault(); stopRecording(); });
+
+
+    // ── VAD toggle ──
+    const vadToggle = $('vad-toggle');
+    let vadEnabled = false;
+
+    vadToggle.addEventListener('change', () => {
+      vadEnabled = vadToggle.checked;
+      btnPtt.textContent = vadEnabled ? 'VAD Active (auto-detect)' : 'Hold to Talk';
+      btnPtt.style.pointerEvents = vadEnabled ? 'none' : '';
+      btnPtt.style.opacity = vadEnabled ? '0.5' : '';
+
+      // Send session.update to toggle turn_detection
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: 'session.update',
+          session: {
+            turn_detection: vadEnabled
+              ? { type: 'server_vad', threshold: 0.5, silence_duration_ms: 500 }
+              : null
+          }
+        }));
+
+        // In VAD mode, start mic stream continuously
+        if (vadEnabled) {
+          startRecording();
+        } else {
+          stopRecording();
+        }
+      }
+    });
 
     // ── Visualization ──
     function drawVisualization(samples) {
