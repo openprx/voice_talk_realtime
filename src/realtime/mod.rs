@@ -1,6 +1,7 @@
 pub mod openai;
 pub mod protocol;
+pub mod xai;
 
-// Re-export for convenience
 pub use openai::OpenAiRealtimeClient;
+pub use xai::{XaiRealtimeClient, XaiAuth, XaiVoice};
 pub use protocol::{ClientEvent, ServerEvent, RealtimeClient};

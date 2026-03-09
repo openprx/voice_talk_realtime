@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 // ── Client → Server events ──────────────────────────────────────────
 
@@ -17,7 +18,7 @@ pub enum ClientEvent {
     #[serde(rename = "response.create")]
     ResponseCreate {
         #[serde(skip_serializing_if = "Option::is_none")]
-        response: Option<serde_json::Value>,
+        response: Option<Value>,
     },
 }
 
@@ -80,8 +81,8 @@ pub type EventCallback = Box<dyn FnMut(ServerEvent)>;
 /// Common trait for all realtime API providers
 pub trait RealtimeClient {
     fn connect(&mut self, url: &str) -> Result<(), JsValue>;
-    fn send_text(&mut self, text: &str) -> Result<(), JsValue>;
-    fn send_audio(&mut self, audio_chunk: &[u8]) -> Result<(), JsValue>;
-    fn on_event(&mut self, callback: EventCallback);
-    fn close(&mut self) -> Result<(), JsValue>;
+    fn send_event(&self, event: &ClientEvent) -> Result<(), JsValue>;
+    fn poll_event(&self) -> Option<ServerEvent>;
+    fn close(&self);
+    fn is_connected(&self) -> bool;
 }

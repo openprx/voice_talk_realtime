@@ -9,31 +9,61 @@ use web_sys::{CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
 
 use crate::realtime::protocol::{ClientEvent, ServerEvent, RealtimeClient};
 
+const XAI_ENDPOINT: &str = "wss://api.x.ai/v1/realtime";
+
+/// Available xAI voices
+pub enum XaiVoice {
+    Tara,
+    Sage,
+    Ash,
+    Coral,
+    Ember,
+}
+
+impl XaiVoice {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tara => "Tara",
+            Self::Sage => "Sage",
+            Self::Ash => "Ash",
+            Self::Coral => "Coral",
+            Self::Ember => "Ember",
+        }
+    }
+}
+
 struct ClientState {
     events: VecDeque<ServerEvent>,
     connected: bool,
 }
 
-pub struct OpenAiRealtimeClient {
-    api_key: String,
+/// xAI Realtime API authentication mode
+pub enum XaiAuth {
+    /// Server-side: pass API key as Bearer token (via subprotocol)
+    ApiKey(String),
+    /// Client-side: use ephemeral client secret token
+    ClientSecret(String),
+}
+
+pub struct XaiRealtimeClient {
+    auth: XaiAuth,
     model: String,
     ws: Option<WebSocket>,
     state: Rc<RefCell<ClientState>>,
-    // prevent closures from being dropped
     _on_open: Option<Closure<dyn FnMut(Event)>>,
     _on_message: Option<Closure<dyn FnMut(MessageEvent)>>,
     _on_error: Option<Closure<dyn FnMut(Event)>>,
     _on_close: Option<Closure<dyn FnMut(CloseEvent)>>,
 }
 
-impl OpenAiRealtimeClient {
+impl XaiRealtimeClient {
     pub fn new() -> Self {
-        Self::with_config("", "gpt-4o-realtime-preview-2024-12-17")
+        Self::with_config(XaiAuth::ApiKey(String::new()), "grok-3-fast-realtime")
     }
 
-    pub fn with_config(api_key: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn with_config(auth: XaiAuth, model: impl Into<String>) -> Self {
         Self {
-            api_key: api_key.into(),
+            auth,
             model: model.into(),
             ws: None,
             state: Rc::new(RefCell::new(ClientState {
@@ -47,12 +77,38 @@ impl OpenAiRealtimeClient {
         }
     }
 
-    pub fn set_api_key(&mut self, api_key: impl Into<String>) {
-        self.api_key = api_key.into();
+    pub fn set_auth(&mut self, auth: XaiAuth) {
+        self.auth = auth;
     }
 
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
+    }
+
+    /// Build default session config for xAI
+    pub fn default_session_config(&self, voice: &XaiVoice, instructions: &str) -> serde_json::Value {
+        serde_json::json!({
+            "voice": voice.as_str(),
+            "instructions": instructions,
+            "turn_detection": {
+                "type": "server_vad"
+            },
+            "tools": [
+                { "type": "web_search" },
+                { "type": "x_search" }
+            ],
+            "input_audio_transcription": {
+                "model": "grok-2-audio"
+            },
+            "audio": {
+                "input": {
+                    "format": { "type": "audio/pcm", "rate": 24000 }
+                },
+                "output": {
+                    "format": { "type": "audio/pcm", "rate": 24000 }
+                }
+            }
+        })
     }
 
     /// Convenience: send session.update
@@ -77,20 +133,11 @@ impl OpenAiRealtimeClient {
         self.send_event(&ClientEvent::ResponseCreate { response })
     }
 
-    fn resolve_url(&self, url: &str) -> String {
-        if url.starts_with("wss://") || url.starts_with("ws://") {
-            return url.to_string();
-        }
-        let model = if !url.is_empty() { url } else { &self.model };
-        format!("wss://api.openai.com/v1/realtime?model={model}")
-    }
-
     fn parse_server_event(raw: &str) -> Option<ServerEvent> {
-        // Try serde first
         if let Ok(ev) = serde_json::from_str::<ServerEvent>(raw) {
             return Some(ev);
         }
-        // Manual fallback for variant event type names
+        // xAI uses same event names as OpenAI but also has output_audio variants
         let value: serde_json::Value = serde_json::from_str(raw).ok()?;
         let event_type = value.get("type")?.as_str()?;
         match event_type {
@@ -100,6 +147,10 @@ impl OpenAiRealtimeClient {
             "response.output_audio_transcript.delta" => Some(ServerEvent::ResponseAudioTranscriptDelta {
                 delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
             }),
+            "input_audio_buffer.speech_started" => {
+                // VAD detected speech start — caller should handle interruption
+                Some(ServerEvent::Unknown)
+            }
             _ => Some(ServerEvent::Unknown),
         }
     }
@@ -109,20 +160,33 @@ impl OpenAiRealtimeClient {
     }
 }
 
-impl RealtimeClient for OpenAiRealtimeClient {
+impl RealtimeClient for XaiRealtimeClient {
     fn connect(&mut self, url: &str) -> Result<(), JsValue> {
-        let ws_url = self.resolve_url(url);
-        let protocols = js_sys::Array::new();
-        protocols.push(&JsValue::from_str("realtime"));
-        if !self.api_key.is_empty() {
-            protocols.push(&JsValue::from_str(&format!(
-                "openai-insecure-api-key.{}",
-                self.api_key
-            )));
-        }
-        protocols.push(&JsValue::from_str("openai-beta.realtime-v1"));
+        let ws_url = if url.starts_with("wss://") || url.starts_with("ws://") {
+            url.to_string()
+        } else {
+            XAI_ENDPOINT.to_string()
+        };
 
-        let ws = WebSocket::new_with_str_sequence(&ws_url, &protocols)?;
+        let protocols = js_sys::Array::new();
+        match &self.auth {
+            XaiAuth::ApiKey(key) => {
+                if !key.is_empty() {
+                    // xAI uses same Bearer approach but via header;
+                    // in browser, we use subprotocol workaround
+                    protocols.push(&JsValue::from_str(&format!("xai-insecure-api-key.{}", key)));
+                }
+            }
+            XaiAuth::ClientSecret(token) => {
+                protocols.push(&JsValue::from_str(&format!("xai-client-secret.{}", token)));
+            }
+        }
+
+        let ws = if protocols.length() > 0 {
+            WebSocket::new_with_str_sequence(&ws_url, &protocols)?
+        } else {
+            WebSocket::new(&ws_url)?
+        };
 
         // onopen
         let open_state = Rc::clone(&self.state);
@@ -216,7 +280,7 @@ impl RealtimeClient for OpenAiRealtimeClient {
     }
 }
 
-impl Default for OpenAiRealtimeClient {
+impl Default for XaiRealtimeClient {
     fn default() -> Self {
         Self::new()
     }
