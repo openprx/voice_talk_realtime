@@ -9,10 +9,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::{CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
 
-use crate::realtime::protocol::{ClientEvent, ServerEvent};
+use crate::realtime::protocol::{ClientEvent, EventCallback, ServerEvent};
 use crate::realtime::RealtimeClient;
-
-type EventCallback = Box<dyn FnMut(ServerEvent)>;
 
 struct ClientState {
     events: VecDeque<ServerEvent>,
@@ -70,11 +68,13 @@ impl OpenAiRealtimeClient {
     }
 
     pub fn commit_audio(&self) -> Result<(), JsValue> {
-        self.send_client_event(&ClientEvent::InputAudioBufferCommit)
+        self.send_client_event(&ClientEvent::InputAudioBufferCommit {})
     }
 
     pub fn create_response(&self, response: serde_json::Value) -> Result<(), JsValue> {
-        self.send_client_event(&ClientEvent::ResponseCreate { response })
+        self.send_client_event(&ClientEvent::ResponseCreate {
+            response: Some(response),
+        })
     }
 
     pub fn poll_event(&mut self) -> Option<ServerEvent> {
@@ -144,13 +144,17 @@ impl OpenAiRealtimeClient {
                         .to_string(),
                 })
             }
-            "response.done" => Some(ServerEvent::ResponseDone),
+            "response.done" => Some(ServerEvent::ResponseDone {
+                response: value
+                    .get("response")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+            }),
             "error" => Some(ServerEvent::Error {
-                message: value
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown websocket error")
-                    .to_string(),
+                error: value
+                    .get("error")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({ "message": "unknown websocket error" })),
             }),
             _ => None,
         }
@@ -200,7 +204,12 @@ impl RealtimeClient for OpenAiRealtimeClient {
                 .map(|e| e.message())
                 .filter(|msg| !msg.is_empty())
                 .unwrap_or_else(|| "websocket error".to_string());
-            OpenAiRealtimeClient::push_event(&error_state, ServerEvent::Error { message });
+            OpenAiRealtimeClient::push_event(
+                &error_state,
+                ServerEvent::Error {
+                    error: json!({ "message": message }),
+                },
+            );
         }) as Box<dyn FnMut(Event)>);
         ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
@@ -215,7 +224,12 @@ impl RealtimeClient for OpenAiRealtimeClient {
                     event.reason()
                 )
             };
-            OpenAiRealtimeClient::push_event(&close_state, ServerEvent::Error { message });
+            OpenAiRealtimeClient::push_event(
+                &close_state,
+                ServerEvent::Error {
+                    error: json!({ "message": message }),
+                },
+            );
         }) as Box<dyn FnMut(CloseEvent)>);
         ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
 
@@ -229,18 +243,18 @@ impl RealtimeClient for OpenAiRealtimeClient {
 
     fn send_text(&mut self, text: &str) -> Result<(), JsValue> {
         self.send_client_event(&ClientEvent::ResponseCreate {
-            response: json!({
+            response: Some(json!({
                 "instructions": text
-            }),
+            })),
         })
     }
 
     fn send_audio(&mut self, audio_chunk: &[u8]) -> Result<(), JsValue> {
         let encoded = base64::engine::general_purpose::STANDARD.encode(audio_chunk);
         self.send_client_event(&ClientEvent::InputAudioBufferAppend { audio: encoded })?;
-        self.send_client_event(&ClientEvent::InputAudioBufferCommit)?;
+        self.send_client_event(&ClientEvent::InputAudioBufferCommit {})?;
         self.send_client_event(&ClientEvent::ResponseCreate {
-            response: serde_json::Value::Object(Default::default()),
+            response: Some(serde_json::Value::Object(Default::default())),
         })
     }
 
