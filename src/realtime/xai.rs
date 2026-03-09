@@ -116,16 +116,38 @@ impl XaiRealtimeClient {
         self.send_event(&ClientEvent::SessionUpdate { session })
     }
 
-    /// Convenience: append base64-encoded audio
+    // Fix #1: send_text() — correct two-step: conversation.item.create + response.create
+    /// Send a text message: create a conversation item then trigger a response.
+    pub fn send_text(&self, text: &str) -> Result<(), JsValue> {
+        let item = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": text
+            }]
+        });
+        self.send_event(&ClientEvent::ConversationItemCreate { item })?;
+        self.send_event(&ClientEvent::ResponseCreate { response: None })
+    }
+
+    // Fix #2: append_audio_base64 — only append, no auto-commit (server_vad handles it)
+    /// Append base64-encoded audio. In server_vad mode, the server will
+    /// automatically detect speech boundaries and trigger responses.
     pub fn append_audio_base64(&self, audio: impl Into<String>) -> Result<(), JsValue> {
         self.send_event(&ClientEvent::InputAudioBufferAppend {
             audio: audio.into(),
         })
     }
 
-    /// Convenience: commit audio buffer
+    /// Explicitly commit audio buffer (only needed in manual/push-to-talk mode)
     pub fn commit_audio(&self) -> Result<(), JsValue> {
         self.send_event(&ClientEvent::InputAudioBufferCommit {})
+    }
+
+    /// Clear audio buffer (useful on interruption)
+    pub fn clear_audio(&self) -> Result<(), JsValue> {
+        self.send_event(&ClientEvent::InputAudioBufferClear {})
     }
 
     /// Convenience: create response
@@ -133,11 +155,16 @@ impl XaiRealtimeClient {
         self.send_event(&ClientEvent::ResponseCreate { response })
     }
 
+    /// Cancel an in-progress response (e.g. on user interruption)
+    pub fn cancel_response(&self) -> Result<(), JsValue> {
+        self.send_event(&ClientEvent::ResponseCancel {})
+    }
+
     fn parse_server_event(raw: &str) -> Option<ServerEvent> {
         if let Ok(ev) = serde_json::from_str::<ServerEvent>(raw) {
             return Some(ev);
         }
-        // xAI uses same event names as OpenAI but also has output_audio variants
+        // xAI uses response.output_audio.delta instead of response.audio.delta
         let value: serde_json::Value = serde_json::from_str(raw).ok()?;
         let event_type = value.get("type")?.as_str()?;
         match event_type {
@@ -147,10 +174,6 @@ impl XaiRealtimeClient {
             "response.output_audio_transcript.delta" => Some(ServerEvent::ResponseAudioTranscriptDelta {
                 delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
             }),
-            "input_audio_buffer.speech_started" => {
-                // VAD detected speech start — caller should handle interruption
-                Some(ServerEvent::Unknown)
-            }
             _ => Some(ServerEvent::Unknown),
         }
     }
@@ -172,8 +195,6 @@ impl RealtimeClient for XaiRealtimeClient {
         match &self.auth {
             XaiAuth::ApiKey(key) => {
                 if !key.is_empty() {
-                    // xAI uses same Bearer approach but via header;
-                    // in browser, we use subprotocol workaround
                     protocols.push(&JsValue::from_str(&format!("xai-insecure-api-key.{}", key)));
                 }
             }
