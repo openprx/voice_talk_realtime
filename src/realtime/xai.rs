@@ -14,21 +14,21 @@ const MAX_EVENT_QUEUE: usize = 1000;
 
 /// Available xAI voices
 pub enum XaiVoice {
-    Tara,
-    Sage,
-    Ash,
-    Coral,
-    Ember,
+    Eve,
+    Ara,
+    Rex,
+    Sal,
+    Leo,
 }
 
 impl XaiVoice {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Tara => "Tara",
-            Self::Sage => "Sage",
-            Self::Ash => "Ash",
-            Self::Coral => "Coral",
-            Self::Ember => "Ember",
+            Self::Eve => "Eve",
+            Self::Ara => "Ara",
+            Self::Rex => "Rex",
+            Self::Sal => "Sal",
+            Self::Leo => "Leo",
         }
     }
 }
@@ -215,14 +215,19 @@ impl RealtimeClient for XaiRealtimeClient {
         let ws_url = if url.starts_with("wss://") || url.starts_with("ws://") {
             url.to_string()
         } else {
-            format!("{}?model={}", XAI_ENDPOINT, self.model)
+            XAI_ENDPOINT.to_string()
         };
 
         let protocols = js_sys::Array::new();
         match &self.auth {
             XaiAuth::ApiKey(key) => {
                 if !key.is_empty() {
-                    protocols.push(&JsValue::from_str(&format!("xai-insecure-api-key.{}", key)));
+                    // ApiKey auth: In server-side (non-browser) contexts, use Authorization header.
+                    // In browser WebSocket, custom headers are not supported.
+                    // Use ClientSecret (xai-client-secret) for browser deployments.
+                    web_sys::console::warn_1(&JsValue::from_str(
+                        "xAI ApiKey auth in browser is not supported. Use ClientSecret instead."
+                    ));
                 }
             }
             XaiAuth::ClientSecret(token) => {
