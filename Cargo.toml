@@ -21,6 +21,8 @@ features = [
   "WebSocket",
   "MessageEvent",
   "BinaryType",
+  "CloseEvent",
+  "ErrorEvent",
   "AudioContext",
   "AudioWorkletNode",
   "Blob",
@@ -29,4 +31,5 @@ features = [
   "MediaStreamConstraints",
   "Navigator",
   "Window",
+  "console",
 ]
