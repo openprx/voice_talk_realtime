@@ -63,6 +63,9 @@ const XAI_DEFAULT_VOICE: &str = "eve";
 const OPENAI_VOICES: &[&str] = &["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"];
 const XAI_VOICES: &[&str] = &["eve", "ara", "rex", "sal", "leo"];
 
+/// Length of the last returned string (for host-side ptr+len reads).
+static mut LAST_RESULT_LEN: usize = 0;
+
 // ── PDK Exports ─────────────────────────────────────────────────────
 
 /// Plugin initialization. Called once when the plugin is loaded.
@@ -184,14 +187,22 @@ pub extern "C" fn on_message(ptr: *const u8, len: usize) -> *mut u8 {
     string_to_ptr(response.to_string())
 }
 
-// ── Free allocated strings ──────────────────────────────────────────
+// ── Result length + Free allocated strings ──────────────────────────
+
+/// Return the byte length of the last result string.
+/// Host calls this after describe()/execute()/etc. to know how many bytes to read.
+#[no_mangle]
+pub extern "C" fn result_len() -> usize {
+    unsafe { LAST_RESULT_LEN }
+}
 
 /// Free a string previously allocated by this plugin.
 #[no_mangle]
 pub extern "C" fn dealloc_str(ptr: *mut u8, len: usize) {
     if !ptr.is_null() && len > 0 {
         unsafe {
-            let _ = Vec::from_raw_parts(ptr, len, len);
+            let layout = std::alloc::Layout::from_size_align_unchecked(len, 1);
+            std::alloc::dealloc(ptr, layout);
         }
     }
 }
@@ -265,7 +276,11 @@ fn execute_voice_session(params: Value) -> *mut u8 {
             "instructions": instructions,
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
-            "turn_detection": { "type": turn_detection },
+            "turn_detection": if turn_detection == "none" {
+                Value::Null
+            } else {
+                json!({ "type": turn_detection })
+            },
             "tools": [
                 { "type": "web_search" },
                 { "type": "x_search" }
@@ -304,7 +319,9 @@ fn error_json(msg: &str) -> String {
 fn string_to_ptr(s: String) -> *mut u8 {
     let mut bytes = s.into_bytes();
     bytes.shrink_to_fit();
+    let len = bytes.len();
     let ptr = bytes.as_mut_ptr();
     std::mem::forget(bytes);
+    unsafe { LAST_RESULT_LEN = len; }
     ptr
 }
