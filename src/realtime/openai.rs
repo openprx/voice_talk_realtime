@@ -78,6 +78,32 @@ impl OpenAiRealtimeClient {
         self.send_event(&ClientEvent::ResponseCreate { response })
     }
 
+    // Fix #1: send_text() — correct two-step: conversation.item.create + response.create
+    /// Send a text message: create a conversation item then trigger a response.
+    pub fn send_text(&self, text: &str) -> Result<(), JsValue> {
+        let item = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": text
+            }]
+        });
+        self.send_event(&ClientEvent::ConversationItemCreate { item })?;
+        self.send_event(&ClientEvent::ResponseCreate { response: None })
+    }
+
+    /// Clear audio buffer (useful on interruption)
+    pub fn clear_audio(&self) -> Result<(), JsValue> {
+        self.send_event(&ClientEvent::InputAudioBufferClear {})
+    }
+
+    /// Cancel an in-progress response (e.g. on user interruption)
+    pub fn cancel_response(&self) -> Result<(), JsValue> {
+        self.send_event(&ClientEvent::ResponseCancel {})
+    }
+
+
     fn resolve_url(&self, url: &str) -> String {
         if url.starts_with("wss://") || url.starts_with("ws://") {
             return url.to_string();

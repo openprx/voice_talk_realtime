@@ -92,6 +92,33 @@ impl VoiceTalkClient {
         }
     }
 
+
+    /// Send a text message (creates conversation item + triggers response).
+    pub fn send_text(&self, text: &str) -> Result<(), JsValue> {
+        match &self.inner {
+            ClientInner::OpenAi(c) => c.send_text(text),
+            ClientInner::Xai(c) => c.send_text(text),
+        }
+    }
+
+    /// Clear the input audio buffer.
+    pub fn clear_audio(&self) -> Result<(), JsValue> {
+        let event = ClientEvent::InputAudioBufferClear {};
+        match &self.inner {
+            ClientInner::OpenAi(c) => c.send_event(&event),
+            ClientInner::Xai(c) => c.send_event(&event),
+        }
+    }
+
+    /// Cancel an in-progress response.
+    pub fn cancel_response(&self) -> Result<(), JsValue> {
+        let event = ClientEvent::ResponseCancel {};
+        match &self.inner {
+            ClientInner::OpenAi(c) => c.send_event(&event),
+            ClientInner::Xai(c) => c.send_event(&event),
+        }
+    }
+
     /// Poll the next server event as a JSON string, or null if none.
     pub fn poll_event(&self) -> Option<String> {
         let event = match &self.inner {
