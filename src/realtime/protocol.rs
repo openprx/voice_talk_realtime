@@ -72,3 +72,16 @@ pub enum ServerEvent {
     #[serde(other)]
     Unknown,
 }
+
+use wasm_bindgen::prelude::*;
+
+pub type EventCallback = Box<dyn FnMut(ServerEvent)>;
+
+/// Common trait for all realtime API providers
+pub trait RealtimeClient {
+    fn connect(&mut self, url: &str) -> Result<(), JsValue>;
+    fn send_text(&mut self, text: &str) -> Result<(), JsValue>;
+    fn send_audio(&mut self, audio_chunk: &[u8]) -> Result<(), JsValue>;
+    fn on_event(&mut self, callback: EventCallback);
+    fn close(&mut self) -> Result<(), JsValue>;
+}

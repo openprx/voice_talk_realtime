@@ -3,4 +3,4 @@ pub mod protocol;
 
 // Re-export for convenience
 pub use openai::OpenAiRealtimeClient;
-pub use protocol::{ClientEvent, ServerEvent};
+pub use protocol::{ClientEvent, ServerEvent, RealtimeClient};
