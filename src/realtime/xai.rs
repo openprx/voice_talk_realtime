@@ -10,6 +10,7 @@ use web_sys::{CloseEvent, ErrorEvent, Event, MessageEvent, WebSocket};
 use crate::realtime::protocol::{ClientEvent, ServerEvent, RealtimeClient};
 
 const XAI_ENDPOINT: &str = "wss://api.x.ai/v1/realtime";
+const MAX_EVENT_QUEUE: usize = 1000;
 
 /// Available xAI voices
 pub enum XaiVoice {
@@ -39,9 +40,11 @@ struct ClientState {
 
 /// xAI Realtime API authentication mode
 pub enum XaiAuth {
-    /// Server-side: pass API key as Bearer token (via subprotocol)
+    /// Server-side: pass API key as Bearer token (via subprotocol).
+    /// WARNING: In browser, the key is visible to any JS on the page.
+    /// Use ClientSecret for browser deployments.
     ApiKey(String),
-    /// Client-side: use ephemeral client secret token
+    /// Client-side: use ephemeral client secret from POST /v1/realtime/client_secrets
     ClientSecret(String),
 }
 
@@ -100,14 +103,8 @@ impl XaiRealtimeClient {
             "input_audio_transcription": {
                 "model": "grok-2-audio"
             },
-            "audio": {
-                "input": {
-                    "format": { "type": "audio/pcm", "rate": 24000 }
-                },
-                "output": {
-                    "format": { "type": "audio/pcm", "rate": 24000 }
-                }
-            }
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16"
         })
     }
 
@@ -116,38 +113,16 @@ impl XaiRealtimeClient {
         self.send_event(&ClientEvent::SessionUpdate { session })
     }
 
-    // Fix #1: send_text() — correct two-step: conversation.item.create + response.create
-    /// Send a text message: create a conversation item then trigger a response.
-    pub fn send_text(&self, text: &str) -> Result<(), JsValue> {
-        let item = serde_json::json!({
-            "type": "message",
-            "role": "user",
-            "content": [{
-                "type": "input_text",
-                "text": text
-            }]
-        });
-        self.send_event(&ClientEvent::ConversationItemCreate { item })?;
-        self.send_event(&ClientEvent::ResponseCreate { response: None })
-    }
-
-    // Fix #2: append_audio_base64 — only append, no auto-commit (server_vad handles it)
-    /// Append base64-encoded audio. In server_vad mode, the server will
-    /// automatically detect speech boundaries and trigger responses.
+    /// Convenience: append base64-encoded audio
     pub fn append_audio_base64(&self, audio: impl Into<String>) -> Result<(), JsValue> {
         self.send_event(&ClientEvent::InputAudioBufferAppend {
             audio: audio.into(),
         })
     }
 
-    /// Explicitly commit audio buffer (only needed in manual/push-to-talk mode)
+    /// Convenience: commit audio buffer
     pub fn commit_audio(&self) -> Result<(), JsValue> {
         self.send_event(&ClientEvent::InputAudioBufferCommit {})
-    }
-
-    /// Clear audio buffer (useful on interruption)
-    pub fn clear_audio(&self) -> Result<(), JsValue> {
-        self.send_event(&ClientEvent::InputAudioBufferClear {})
     }
 
     /// Convenience: create response
@@ -155,40 +130,66 @@ impl XaiRealtimeClient {
         self.send_event(&ClientEvent::ResponseCreate { response })
     }
 
-    /// Cancel an in-progress response (e.g. on user interruption)
-    pub fn cancel_response(&self) -> Result<(), JsValue> {
-        self.send_event(&ClientEvent::ResponseCancel {})
-    }
-
     fn parse_server_event(raw: &str) -> Option<ServerEvent> {
-        if let Ok(ev) = serde_json::from_str::<ServerEvent>(raw) {
-            return Some(ev);
-        }
-        // xAI uses response.output_audio.delta instead of response.audio.delta
         let value: serde_json::Value = serde_json::from_str(raw).ok()?;
         let event_type = value.get("type")?.as_str()?;
+
+        // Handle xAI-specific event names before serde (which would match #[serde(other)])
         match event_type {
-            "response.output_audio.delta" => Some(ServerEvent::ResponseAudioDelta {
-                delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            }),
-            "response.output_audio_transcript.delta" => Some(ServerEvent::ResponseAudioTranscriptDelta {
-                delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-            }),
-            _ => Some(ServerEvent::Unknown),
+            "response.output_audio.delta" => {
+                return Some(ServerEvent::ResponseAudioDelta {
+                    delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                });
+            }
+            "response.output_audio_transcript.delta" => {
+                return Some(ServerEvent::ResponseAudioTranscriptDelta {
+                    delta: value.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                });
+            }
+            _ => {}
+        }
+
+        // For standard events, use serde deserialization
+        match serde_json::from_value::<ServerEvent>(value) {
+            Ok(ev) => Some(ev),
+            Err(_) => Some(ServerEvent::Unknown),
         }
     }
 
     fn push_event(state: &Rc<RefCell<ClientState>>, event: ServerEvent) {
-        state.borrow_mut().events.push_back(event);
+        let mut s = state.borrow_mut();
+        if s.events.len() > MAX_EVENT_QUEUE {
+            s.events.pop_front();
+        }
+        s.events.push_back(event);
+    }
+
+    fn cleanup(&mut self) {
+        if let Some(ws) = self.ws.take() {
+            ws.set_onopen(None);
+            ws.set_onmessage(None);
+            ws.set_onerror(None);
+            ws.set_onclose(None);
+            let _ = ws.close();
+        }
+        self._on_open = None;
+        self._on_message = None;
+        self._on_error = None;
+        self._on_close = None;
     }
 }
 
 impl RealtimeClient for XaiRealtimeClient {
     fn connect(&mut self, url: &str) -> Result<(), JsValue> {
+        // H1: Clean up previous connection
+        self.cleanup();
+        self.state.borrow_mut().events.clear();
+
+        // C2: Include model in URL
         let ws_url = if url.starts_with("wss://") || url.starts_with("ws://") {
             url.to_string()
         } else {
-            XAI_ENDPOINT.to_string()
+            format!("{}?model={}", XAI_ENDPOINT, self.model)
         };
 
         let protocols = js_sys::Array::new();
@@ -209,31 +210,23 @@ impl RealtimeClient for XaiRealtimeClient {
             WebSocket::new(&ws_url)?
         };
 
-        // onopen
+        // H4: Only set connected, don't emit synthetic SessionCreated
         let open_state = Rc::clone(&self.state);
         let on_open = Closure::wrap(Box::new(move |_: Event| {
             open_state.borrow_mut().connected = true;
-            Self::push_event(
-                &open_state,
-                ServerEvent::SessionCreated {
-                    session: serde_json::Value::Null,
-                },
-            );
         }) as Box<dyn FnMut(Event)>);
         ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
 
-        // onmessage
         let msg_state = Rc::clone(&self.state);
         let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
             if let Some(text) = event.data().as_string() {
-                if let Some(parsed) = Self::parse_server_event(&text) {
-                    Self::push_event(&msg_state, parsed);
+                if let Some(parsed) = XaiRealtimeClient::parse_server_event(&text) {
+                    XaiRealtimeClient::push_event(&msg_state, parsed);
                 }
             }
         }) as Box<dyn FnMut(MessageEvent)>);
         ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
-        // onerror
         let err_state = Rc::clone(&self.state);
         let on_error = Closure::wrap(Box::new(move |event: Event| {
             let message = event
@@ -241,7 +234,7 @@ impl RealtimeClient for XaiRealtimeClient {
                 .map(|e| e.message())
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| "websocket error".to_string());
-            Self::push_event(
+            XaiRealtimeClient::push_event(
                 &err_state,
                 ServerEvent::Error {
                     error: serde_json::Value::String(message),
@@ -250,7 +243,6 @@ impl RealtimeClient for XaiRealtimeClient {
         }) as Box<dyn FnMut(Event)>);
         ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
-        // onclose
         let close_state = Rc::clone(&self.state);
         let on_close = Closure::wrap(Box::new(move |event: CloseEvent| {
             close_state.borrow_mut().connected = false;
@@ -259,7 +251,7 @@ impl RealtimeClient for XaiRealtimeClient {
             } else {
                 format!("websocket closed: {} ({})", event.reason(), event.code())
             };
-            Self::push_event(
+            XaiRealtimeClient::push_event(
                 &close_state,
                 ServerEvent::Error {
                     error: serde_json::Value::String(message),
@@ -281,6 +273,10 @@ impl RealtimeClient for XaiRealtimeClient {
             .ws
             .as_ref()
             .ok_or_else(|| JsValue::from_str("WebSocket not connected"))?;
+        // M4: Check readyState
+        if ws.ready_state() != WebSocket::OPEN {
+            return Err(JsValue::from_str("WebSocket not in OPEN state"));
+        }
         let payload = serde_json::to_string(event)
             .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))?;
         ws.send_with_str(&payload)
@@ -292,6 +288,10 @@ impl RealtimeClient for XaiRealtimeClient {
 
     fn close(&self) {
         if let Some(ws) = &self.ws {
+            ws.set_onopen(None);
+            ws.set_onmessage(None);
+            ws.set_onerror(None);
+            ws.set_onclose(None);
             let _ = ws.close();
         }
     }
