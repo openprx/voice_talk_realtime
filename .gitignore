@@ -4,3 +4,4 @@
 node_modules/
 -e /target/
 /prx-plugin/target/
+CODEX_GUIDE.md
