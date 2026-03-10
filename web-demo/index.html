@@ -294,7 +294,7 @@
       addMessage('user', '🎤 (speaking...)');
 
       try {
-        audioCtx = new AudioContext({ sampleRate: 24000 });
+        audioCtx = new AudioContext();
         await audioCtx.audioWorklet.addModule('js/audio_worklet.js');
 
         mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
