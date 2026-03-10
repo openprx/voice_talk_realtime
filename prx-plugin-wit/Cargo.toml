@@ -1,0 +1,28 @@
+[workspace]
+
+[package]
+name = "voice-realtime-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time voice session tool plugin for PRX"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+prx-pdk = { path = "/opt/code/prx/pdk/rust/prx-pdk" }
+wit-bindgen = { version = "0.51", default-features = false, features = ["macros"] }
+wit-bindgen-rt = "0.41"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[package.metadata.component]
+package = "component:voice-realtime"
+
+[package.metadata.component.target]
+world = "voice-tool"
+
+[package.metadata.component.target.dependencies]
+"prx:host" = { path = "wit/deps/host" }
+"prx:plugin" = { path = "wit/deps/plugin" }

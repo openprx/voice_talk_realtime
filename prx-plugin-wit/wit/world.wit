@@ -1,0 +1,12 @@
+package component:voice-realtime;
+
+world voice-tool {
+    import prx:host/log;
+    import prx:host/config;
+    import prx:host/kv;
+    import prx:host/http-outbound;
+    import prx:host/memory;
+    import prx:host/events;
+
+    export prx:plugin/tool-exports;
+}
