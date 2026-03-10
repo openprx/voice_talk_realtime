@@ -220,15 +220,10 @@ impl RealtimeClient for XaiRealtimeClient {
 
         let protocols = js_sys::Array::new();
         match &self.auth {
-            XaiAuth::ApiKey(key) => {
-                if !key.is_empty() {
-                    // ApiKey auth: In server-side (non-browser) contexts, use Authorization header.
-                    // In browser WebSocket, custom headers are not supported.
-                    // Use ClientSecret (xai-client-secret) for browser deployments.
-                    web_sys::console::warn_1(&JsValue::from_str(
-                        "xAI ApiKey auth in browser is not supported. Use ClientSecret instead."
-                    ));
-                }
+            XaiAuth::ApiKey(_) => {
+                return Err(JsValue::from_str(
+                    "xAI ApiKey auth is not supported in browser WebSocket. Use ClientSecret instead."
+                ));
             }
             XaiAuth::ClientSecret(token) => {
                 protocols.push(&JsValue::from_str(&format!("xai-client-secret.{}", token)));
