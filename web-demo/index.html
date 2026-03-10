@@ -142,6 +142,13 @@
       btnConnect.disabled = true;
       setStatus(false, 'Connecting...');
 
+      // Close any existing connection before creating new one
+      if (ws) {
+        ws.onclose = null; ws.onerror = null; ws.onmessage = null;
+        ws.close();
+        ws = null;
+      }
+
       try {
         let url, protocols;
         if (provider === 'openai') {
@@ -294,28 +301,31 @@
       addMessage('user', '🎤 (speaking...)');
 
       try {
+        // Step 1: Get microphone stream FIRST
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true }
+          });
+        } catch (micErr) {
+          addMessage('system', 'Microphone access denied: ' + micErr.message + '. Check browser permissions.');
+          isRecording = false;
+          btnPtt.classList.remove('active');
+          btnPtt.textContent = vadEnabled ? 'VAD Active (auto-detect)' : 'Hold to Talk';
+          return;
+        }
+        if (!mediaStream || mediaStream.getAudioTracks().length === 0) {
+          addMessage('system', 'No audio track available. Check microphone and permissions.');
+          isRecording = false;
+          btnPtt.classList.remove('active');
+          btnPtt.textContent = vadEnabled ? 'VAD Active (auto-detect)' : 'Hold to Talk';
+          return;
+        }
+
+        // Step 2: Create AudioContext AFTER we have a valid stream
         audioCtx = new AudioContext();
         if (audioCtx.state === 'suspended') await audioCtx.resume();
         await audioCtx.audioWorklet.addModule('js/audio_worklet.js');
 
-        try {
-          mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-        } catch (micErr) {
-          addMessage('system', 'Microphone access denied: ' + micErr.message + '. Check browser permissions.');
-          if (audioCtx) { audioCtx.close(); audioCtx = null; }
-          isRecording = false;
-          btnPtt.classList.remove('active');
-          btnPtt.textContent = 'Hold to Talk';
-          return;
-        }
-        if (!mediaStream) {
-          addMessage('system', 'Microphone stream is null. Check permissions.');
-          if (audioCtx) { audioCtx.close(); audioCtx = null; }
-          isRecording = false;
-          btnPtt.classList.remove('active');
-          btnPtt.textContent = 'Hold to Talk';
-          return;
-        }
         const source = audioCtx.createMediaStreamSource(mediaStream);
         workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture-processor');
 
