@@ -5,7 +5,7 @@ name = "voice-realtime-tool"
 version = "0.1.0"
 edition = "2021"
 description = "Real-time voice session tool plugin for PRX"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

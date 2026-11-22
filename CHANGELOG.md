@@ -6,6 +6,10 @@ are dated and summarise the git history.
 
 ## [Unreleased]
 
+### Changed
+
+- The README and the package manifests now state the Apache-2.0 licence, matching the `LICENSE` file.
+
 ### Removed
 
 - 2026-11-22: the original project plan (`PLAN.md`) and the notes on the vendor's API page
